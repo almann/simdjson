@@ -206,6 +206,32 @@ struct structural_parser {
     return parse_number(structurals.current(), found_minus);
   }
 
+  WARN_UNUSED really_inline bool parse_single_number(size_t len, bool found_minus) {
+    /**
+    * We need to make a copy to make sure that the string is space terminated.
+    * This is not about padding the input, which should already padded up
+    * to len + SIMDJSON_PADDING. However, we have no control at this stage
+    * on how the padding was done. What if the input string was padded with nulls?
+    * It is quite common for an input string to have an extra null character (C string).
+    * We do not want to allow 9\0 (where \0 is the null character) inside a JSON
+    * document, but the string "9\0" by itself is fine. So we make a copy and
+    * pad the input with spaces when we know that there is just one input element.
+    * This copy is relatively expensive, but it will almost never be called in
+    * practice unless you are in the strange scenario where you have many JSON
+    * documents made of single atoms.
+    */
+    size_t remaining_len = structurals.buf + len - structurals.current();
+    uint8_t *copy = static_cast<uint8_t *>(malloc(remaining_len + SIMDJSON_PADDING));
+    if (copy == nullptr) {
+      return true;
+    }
+    memcpy(copy, structurals.current(), remaining_len);
+    memset(copy + remaining_len, ' ', SIMDJSON_PADDING);
+    bool result = parse_number(copy, found_minus);
+    free(copy);
+    return result;
+  }
+
   WARN_UNUSED really_inline bool parse_atom() {
     switch (structurals.current_char()) {
       case 't':
@@ -224,33 +250,6 @@ struct structural_parser {
         return true;
     }
     return false;
-  }
-
-  template<typename F>
-  really_inline bool with_space_terminated_copy(size_t len, const F& f) {
-    /**
-    * We need to make a copy to make sure that the string is space terminated.
-    * This is not about padding the input, which should already padded up
-    * to len + SIMDJSON_PADDING. However, we have no control at this stage
-    * on how the padding was done. What if the input string was padded with nulls?
-    * It is quite common for an input string to have an extra null character (C string).
-    * We do not want to allow 9\0 (where \0 is the null character) inside a JSON
-    * document, but the string "9\0" by itself is fine. So we make a copy and
-    * pad the input with spaces when we know that there is just one input element.
-    * This copy is relatively expensive, but it will almost never be called in
-    * practice unless you are in the strange scenario where you have many JSON
-    * documents made of single atoms.
-    */
-    size_t remaining_len = structurals.buf + len - structurals.current();
-    char *copy = static_cast<char *>(malloc(remaining_len + SIMDJSON_PADDING));
-    if (copy == nullptr) {
-      return true;
-    }
-    memcpy(copy, structurals.current(), remaining_len);
-    memset(copy + remaining_len, ' ', SIMDJSON_PADDING);
-    bool result = f(reinterpret_cast<const uint8_t*>(copy), 0);
-    free(copy);
-    return result;
   }
 
   really_inline size_t remaining_len(size_t len) {
@@ -435,18 +434,10 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
     goto finish;
   case '0': case '1': case '2': case '3': case '4':
   case '5': case '6': case '7': case '8': case '9':
-    FAIL_IF(
-      parser.with_space_terminated_copy(len, [&](const uint8_t *copy, size_t idx) {
-        return parser.parse_number(&copy[idx], false);
-      })
-    );
+    FAIL_IF( parser.parse_single_number(len, false) );
     goto finish;
   case '-':
-    FAIL_IF(
-      parser.with_space_terminated_copy(len, [&](const uint8_t *copy, size_t idx) {
-        return parser.parse_number(&copy[idx], true);
-      })
-    );
+    FAIL_IF( parser.parse_single_number(len, true) );
     goto finish;
   default:
     goto error;
