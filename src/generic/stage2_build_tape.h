@@ -47,31 +47,6 @@ struct unified_machine_addresses {
 #undef FAIL_IF
 #define FAIL_IF(EXPR) { if (EXPR) { return addresses.error; } }
 
-class structural_iterator {
-public:
-  really_inline structural_iterator(const uint8_t* _buf, const uint32_t *_next_structural_index)
-    : buf{_buf},
-      next_structural_index{_next_structural_index}
-    {}
-  really_inline char peek_char() {
-    return buf[*next_structural_index];
-  }
-  really_inline char advance_char() {
-    // Start pulling the next iteration pointer early
-    next_structural_index++;
-    return current_char();
-  }
-  really_inline char current_char() {
-    return *current();
-  }
-  really_inline const uint8_t* current() {
-    return &buf[*(next_structural_index-1)];
-  }
-
-  const uint8_t *const buf;
-  const uint32_t *next_structural_index;
-};
-
 struct number_writer {
   parser &doc_parser;
   
@@ -96,18 +71,20 @@ struct number_writer {
 }; // struct number_writer
 
 struct structural_parser {
-  structural_iterator structurals;
   parser &doc_parser;
   /** Next write location in the string buf for stage 2 parsing */
+  const uint8_t *const buf;
+  const uint32_t *next_structural_index;
   uint8_t *current_string_buf_loc{};
   uint32_t depth;
 
   really_inline structural_parser(
-    const uint8_t *buf,
+    const uint8_t *_buf,
     parser &_doc_parser,
     uint32_t next_structural = 0
-  ) : structurals(buf, &_doc_parser.structural_indexes[next_structural]),
-      doc_parser{_doc_parser},
+  ) : doc_parser{_doc_parser},
+      buf{_buf},
+      next_structural_index{&_doc_parser.structural_indexes[next_structural]},
       depth{0}
   {}
 
@@ -191,7 +168,7 @@ struct structural_parser {
 
   WARN_UNUSED really_inline bool parse_string() {
     uint8_t *dst = on_start_string();
-    dst = stringparsing::parse_string(structurals.current(), dst);
+    dst = stringparsing::parse_string(current_buf(), dst);
     if (dst == nullptr) {
       return true;
     }
@@ -203,7 +180,7 @@ struct structural_parser {
     return !numberparsing::parse_number(src, found_minus, writer);
   }
   WARN_UNUSED really_inline bool parse_number(bool found_minus) {
-    return parse_number(structurals.current(), found_minus);
+    return parse_number(current_buf(), found_minus);
   }
 
   WARN_UNUSED really_inline bool parse_single_number(size_t len, bool found_minus) {
@@ -220,12 +197,12 @@ struct structural_parser {
     * practice unless you are in the strange scenario where you have many JSON
     * documents made of single atoms.
     */
-    size_t remaining_len = structurals.buf + len - structurals.current();
+    size_t remaining_len = buf + len - current_buf();
     uint8_t *copy = static_cast<uint8_t *>(malloc(remaining_len + SIMDJSON_PADDING));
     if (copy == nullptr) {
       return true;
     }
-    memcpy(copy, structurals.current(), remaining_len);
+    memcpy(copy, current_buf(), remaining_len);
     memset(copy + remaining_len, ' ', SIMDJSON_PADDING);
     bool result = parse_number(copy, found_minus);
     free(copy);
@@ -233,17 +210,17 @@ struct structural_parser {
   }
 
   WARN_UNUSED really_inline bool parse_atom() {
-    switch (structurals.current_char()) {
+    switch (current_char()) {
       case 't':
-        if (!atomparsing::is_valid_true_atom(structurals.current())) { return true; }
+        if (!atomparsing::is_valid_true_atom(current_buf())) { return true; }
         write_tape(0, internal::tape_type::TRUE_VALUE);
         break;
       case 'f':
-        if (!atomparsing::is_valid_false_atom(structurals.current())) { return true; }
+        if (!atomparsing::is_valid_false_atom(current_buf())) { return true; }
         write_tape(0, internal::tape_type::FALSE_VALUE);
         break;
       case 'n':
-        if (!atomparsing::is_valid_null_atom(structurals.current())) { return true; }
+        if (!atomparsing::is_valid_null_atom(current_buf())) { return true; }
         write_tape(0, internal::tape_type::NULL_VALUE);
         break;
       default:
@@ -253,21 +230,21 @@ struct structural_parser {
   }
 
   really_inline size_t remaining_len(size_t len) {
-    return structurals.buf + len - structurals.current();
+    return buf + len - current_buf();
   }
 
   WARN_UNUSED really_inline bool parse_single_atom(size_t len) {
-    switch (structurals.current_char()) {
+    switch (current_char()) {
       case 't':
-        if (!atomparsing::is_valid_true_atom(structurals.current(), remaining_len(len))) { return true; }
+        if (!atomparsing::is_valid_true_atom(current_buf(), remaining_len(len))) { return true; }
         write_tape(0, internal::tape_type::TRUE_VALUE);
         break;
       case 'f':
-        if (!atomparsing::is_valid_false_atom(structurals.current(), remaining_len(len))) { return true; }
+        if (!atomparsing::is_valid_false_atom(current_buf(), remaining_len(len))) { return true; }
         write_tape(0, internal::tape_type::FALSE_VALUE);
         break;
       case 'n':
-        if (!atomparsing::is_valid_null_atom(structurals.current(), remaining_len(len))) { return true; }
+        if (!atomparsing::is_valid_null_atom(current_buf(), remaining_len(len))) { return true; }
         write_tape(0, internal::tape_type::NULL_VALUE);
         break;
       default:
@@ -309,7 +286,7 @@ struct structural_parser {
 
   WARN_UNUSED really_inline error_code finish() {
     // the string might not be NULL terminated.
-    if ( structurals.next_structural_index == end_structural_indexes() ) {
+    if ( next_structural_index == end_structural_indexes() ) {
       return on_error(TAPE_ERROR);
     }
     end_document();
@@ -347,7 +324,7 @@ struct structural_parser {
     if (depth >= doc_parser.max_depth()) {
       return on_error(DEPTH_ERROR);
     }
-    switch (structurals.current_char()) {
+    switch (current_char()) {
     case '"':
       return on_error(STRING_ERROR);
     case '0':
@@ -392,11 +369,19 @@ struct structural_parser {
     return SUCCESS;
   }
 
-  really_inline char advance_char() {
-    return structurals.advance_char();
-  }
   really_inline char peek_char() {
-    return structurals.peek_char();
+    return buf[*next_structural_index];
+  }
+  really_inline char advance_char() {
+    // Start pulling the next iteration pointer early
+    next_structural_index++;
+    return current_char();
+  }
+  really_inline char current_char() {
+    return *current_buf();
+  }
+  really_inline const uint8_t* current_buf() {
+    return &buf[*(next_structural_index-1)];
   }
 };
 
@@ -419,7 +404,7 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
   //
   // Read first value
   //
-  switch (parser.structurals.advance_char()) {
+  switch (parser.advance_char()) {
   case '{':
     FAIL_IF( parser.start_object(addresses.finish) );
     goto object_begin;

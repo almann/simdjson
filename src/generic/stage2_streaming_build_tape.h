@@ -1,7 +1,13 @@
 namespace stage2 {
 
 struct streaming_structural_parser: structural_parser {
-  really_inline streaming_structural_parser(const uint8_t *buf, parser &_doc_parser, uint32_t next_structural) : structural_parser(buf, _doc_parser, next_structural) {}
+  really_inline streaming_structural_parser(
+    const uint8_t *_buf,
+    parser &_doc_parser,
+    uint32_t next_structural
+  ) : structural_parser(_buf, _doc_parser, next_structural)
+  {
+  }
 
   // override to add streaming
   WARN_UNUSED really_inline error_code start(UNUSED size_t len, ret_address finish_parser) {
@@ -18,7 +24,7 @@ struct streaming_structural_parser: structural_parser {
 
   // override to add streaming
   WARN_UNUSED really_inline error_code finish() {
-    if ( structurals.next_structural_index > end_structural_indexes() ) {
+    if ( next_structural_index > end_structural_indexes() ) {
       return on_error(TAPE_ERROR);
     }
     end_document();
@@ -28,7 +34,7 @@ struct streaming_structural_parser: structural_parser {
     if (doc_parser.containing_scope[depth].tape_index != 0) {
       return on_error(TAPE_ERROR);
     }
-    bool finished = structurals.next_structural_index == end_structural_indexes();
+    bool finished = next_structural_index == end_structural_indexes();
     return on_success(finished ? SUCCESS : SUCCESS_AND_HAS_MORE);
   }
 };
@@ -48,7 +54,7 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
   //
   // Read first value
   //
-  switch (parser.structurals.advance_char()) {
+  switch (parser.advance_char()) {
   case '{':
     FAIL_IF( parser.start_object(addresses.finish) );
     goto object_begin;
@@ -137,7 +143,7 @@ array_continue:
   }
 
 finish:
-  next_json = parser.structurals.next_structural_index - parser.doc_parser.structural_indexes.get();
+  next_json = parser.next_structural_index - parser.doc_parser.structural_indexes.get();
   return parser.finish();
 
 error:
