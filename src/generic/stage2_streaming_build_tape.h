@@ -1,7 +1,7 @@
 namespace stage2 {
 
 struct streaming_structural_parser: structural_parser {
-  really_inline streaming_structural_parser(const uint8_t *buf, size_t len, parser &_doc_parser, uint32_t next_structural) : structural_parser(buf, len, _doc_parser, next_structural) {}
+  really_inline streaming_structural_parser(const uint8_t *buf, parser &_doc_parser, uint32_t next_structural) : structural_parser(buf, _doc_parser, next_structural) {}
 
   // override to add streaming
   WARN_UNUSED really_inline error_code start(UNUSED size_t len, ret_address finish_parser) {
@@ -18,7 +18,7 @@ struct streaming_structural_parser: structural_parser {
 
   // override to add streaming
   WARN_UNUSED really_inline error_code finish() {
-    if ( structurals.past_end(doc_parser) ) {
+    if ( structurals.next_structural_index > end_structural_indexes() ) {
       return on_error(TAPE_ERROR);
     }
     end_document();
@@ -28,7 +28,7 @@ struct streaming_structural_parser: structural_parser {
     if (doc_parser.containing_scope[depth].tape_index != 0) {
       return on_error(TAPE_ERROR);
     }
-    bool finished = structurals.at_end(doc_parser);
+    bool finished = structurals.next_structural_index == end_structural_indexes();
     return on_success(finished ? SUCCESS : SUCCESS_AND_HAS_MORE);
   }
 };
@@ -41,7 +41,7 @@ struct streaming_structural_parser: structural_parser {
  ***********/
 WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, parser &doc_parser, size_t &next_json) const noexcept {
   static constexpr stage2::unified_machine_addresses addresses = INIT_ADDRESSES();
-  stage2::streaming_structural_parser parser(buf, len, doc_parser, uint32_t(next_json));
+  stage2::streaming_structural_parser parser(buf, doc_parser, uint32_t(next_json));
   error_code result = parser.start(len, addresses.finish);
   if (result) { return result; }
 
@@ -59,19 +59,19 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
     FAIL_IF( parser.parse_string() );
     goto finish;
   case 't': case 'f': case 'n':
-    FAIL_IF( parser.parse_single_atom() );
+    FAIL_IF( parser.parse_single_atom(len) );
     goto finish;
   case '0': case '1': case '2': case '3': case '4':
   case '5': case '6': case '7': case '8': case '9':
     FAIL_IF(
-      parser.structurals.with_space_terminated_copy([&](const uint8_t *copy, size_t idx) {
+      parser.with_space_terminated_copy(len, [&](const uint8_t *copy, size_t idx) {
         return parser.parse_number(&copy[idx], false);
       })
     );
     goto finish;
   case '-':
     FAIL_IF(
-      parser.structurals.with_space_terminated_copy([&](const uint8_t *copy, size_t idx) {
+      parser.with_space_terminated_copy(len, [&](const uint8_t *copy, size_t idx) {
         return parser.parse_number(&copy[idx], true);
       })
     );
