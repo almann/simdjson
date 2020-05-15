@@ -18,7 +18,7 @@ struct streaming_structural_parser: structural_parser {
 
   // override to add streaming
   WARN_UNUSED really_inline error_code finish() {
-    if ( structurals.past_end(doc_parser.n_structural_indexes) ) {
+    if ( structurals.past_end(doc_parser) ) {
       return on_error(TAPE_ERROR);
     }
     end_document();
@@ -28,7 +28,7 @@ struct streaming_structural_parser: structural_parser {
     if (doc_parser.containing_scope[depth].tape_index != 0) {
       return on_error(TAPE_ERROR);
     }
-    bool finished = structurals.at_end(doc_parser.n_structural_indexes);
+    bool finished = structurals.at_end(doc_parser);
     return on_success(finished ? SUCCESS : SUCCESS_AND_HAS_MORE);
   }
 };
@@ -44,10 +44,11 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
   stage2::streaming_structural_parser parser(buf, len, doc_parser, uint32_t(next_json));
   error_code result = parser.start(len, addresses.finish);
   if (result) { return result; }
+
   //
   // Read first value
   //
-  switch (parser.structurals.current_char()) {
+  switch (parser.structurals.advance_char()) {
   case '{':
     FAIL_IF( parser.start_object(addresses.finish) );
     goto object_begin;
@@ -97,8 +98,6 @@ object_begin:
 
 object_key_parser:
   FAIL_IF( parser.advance_char() != ':' );
-  parser.increment_count();
-  parser.advance_char();
   GOTO( parser.parse_value(addresses, addresses.object_continue) );
 
 object_continue:
@@ -121,7 +120,8 @@ scope_end:
 // Array parser parsers
 //
 array_begin:
-  if (parser.advance_char() == ']') {
+  if (parser.peek_char() == ']') {
+    parser.advance_char();
     parser.end_array();
     goto scope_end;
   }
@@ -136,7 +136,6 @@ array_continue:
   switch (parser.advance_char()) {
   case ',':
     parser.increment_count();
-    parser.advance_char();
     goto main_array_switch;
   case ']':
     parser.end_array();
@@ -146,7 +145,7 @@ array_continue:
   }
 
 finish:
-  next_json = parser.structurals.next_structural_index();
+  next_json = parser.structurals.next_structural_index - parser.doc_parser.structural_indexes.get();
   return parser.finish();
 
 error:

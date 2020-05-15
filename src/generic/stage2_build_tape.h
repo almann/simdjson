@@ -49,26 +49,27 @@ struct unified_machine_addresses {
 
 class structural_iterator {
 public:
-  really_inline structural_iterator(const uint8_t* _buf, size_t _len, const uint32_t *_structural_indexes, size_t next_structural_index)
+  really_inline structural_iterator(const uint8_t* _buf, size_t _len, const uint32_t *_next_structural_index)
     : buf{_buf},
-     len{_len},
-     structural_indexes{_structural_indexes},
-     next_structural{next_structural_index}
+      len{_len},
+      next_structural_index{_next_structural_index}
     {}
+  really_inline char peek_char() {
+    return buf[*next_structural_index];
+  }
   really_inline char advance_char() {
-    idx = structural_indexes[next_structural];
-    next_structural++;
-    c = *current();
-    return c;
+    // Start pulling the next iteration pointer early
+    next_structural_index++;
+    return current_char();
   }
   really_inline char current_char() {
-    return c;
+    return *current();
   }
   really_inline const uint8_t* current() {
-    return &buf[idx];
+    return &buf[*(next_structural_index-1)];
   }
   really_inline size_t remaining_len() {
-    return len - idx;
+    return buf + len - current();
   }
   template<typename F>
   really_inline bool with_space_terminated_copy(const F& f) {
@@ -85,32 +86,26 @@ public:
     * practice unless you are in the strange scenario where you have many JSON
     * documents made of single atoms.
     */
-    char *copy = static_cast<char *>(malloc(len + SIMDJSON_PADDING));
+    char *copy = static_cast<char *>(malloc(remaining_len() + SIMDJSON_PADDING));
     if (copy == nullptr) {
       return true;
     }
-    memcpy(copy, buf, len);
-    memset(copy + len, ' ', SIMDJSON_PADDING);
-    bool result = f(reinterpret_cast<const uint8_t*>(copy), idx);
+    memcpy(copy, current(), remaining_len());
+    memset(copy + remaining_len(), ' ', SIMDJSON_PADDING);
+    bool result = f(reinterpret_cast<const uint8_t*>(copy), 0);
     free(copy);
     return result;
   }
-  really_inline bool past_end(uint32_t n_structural_indexes) {
-    return next_structural+1 > n_structural_indexes;
+  really_inline bool past_end(parser &doc_parser) {
+    return next_structural_index - doc_parser.structural_indexes.get() > doc_parser.n_structural_indexes;
   }
-  really_inline bool at_end(uint32_t n_structural_indexes) {
-    return next_structural+1 == n_structural_indexes;
-  }
-  really_inline size_t next_structural_index() {
-    return next_structural;
+  really_inline bool at_end(parser &doc_parser) {
+    return next_structural_index - doc_parser.structural_indexes.get() == doc_parser.n_structural_indexes - 1;
   }
 
-  const uint8_t* const buf;
+  const uint8_t * const buf;
   const size_t len;
-  const uint32_t* const structural_indexes;
-  size_t next_structural; // next structural index
-  size_t idx{0}; // location of the structural character in the input (buf)
-  uint8_t c{0};  // used to track the (structural) character we are looking at
+  const uint32_t *next_structural_index;
 };
 
 struct number_writer {
@@ -148,7 +143,7 @@ struct structural_parser {
     size_t len,
     parser &_doc_parser,
     uint32_t next_structural = 0
-  ) : structurals(buf, len, _doc_parser.structural_indexes.get(), next_structural), doc_parser{_doc_parser}, depth{0} {}
+  ) : structurals(buf, len, &_doc_parser.structural_indexes[next_structural]), doc_parser{_doc_parser}, depth{0} {}
 
   WARN_UNUSED really_inline bool start_scope(internal::tape_type type, ret_address continue_state) {
     doc_parser.containing_scope[depth].tape_index = doc_parser.current_loc;
@@ -286,7 +281,8 @@ struct structural_parser {
   }
 
   WARN_UNUSED really_inline ret_address parse_value(const unified_machine_addresses &addresses, ret_address continue_state) {
-    switch (structurals.current_char()) {
+    increment_count();
+    switch (advance_char()) {
     case '"':
       FAIL_IF( parse_string() );
       return continue_state;
@@ -313,7 +309,7 @@ struct structural_parser {
 
   WARN_UNUSED really_inline error_code finish() {
     // the string might not be NULL terminated.
-    if ( !structurals.at_end(doc_parser.n_structural_indexes) ) {
+    if ( !structurals.at_end(doc_parser) ) {
       return on_error(TAPE_ERROR);
     }
     end_document();
@@ -389,8 +385,6 @@ struct structural_parser {
     if (len > doc_parser.capacity()) {
       return CAPACITY;
     }
-    // Advance to the first character as soon as possible
-    structurals.advance_char();
     // Push the root scope (there is always at least one scope)
     if (start_document(finish_state)) {
       return on_error(DEPTH_ERROR);
@@ -400,6 +394,9 @@ struct structural_parser {
 
   really_inline char advance_char() {
     return structurals.advance_char();
+  }
+  really_inline char peek_char() {
+    return structurals.peek_char();
   }
 };
 
@@ -422,7 +419,7 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
   //
   // Read first value
   //
-  switch (parser.structurals.current_char()) {
+  switch (parser.structurals.advance_char()) {
   case '{':
     FAIL_IF( parser.start_object(addresses.finish) );
     goto object_begin;
@@ -454,78 +451,82 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
     goto error;
   }
 
-//
-// Object parser states
-//
-object_begin:
-  switch (parser.advance_char()) {
-  case '"': {
-    parser.increment_count();
-    FAIL_IF( parser.parse_string() );
-    goto object_key_state;
-  }
-  case '}':
-    parser.end_object();
-    goto scope_end;
-  default:
-    goto error;
-  }
-
-object_key_state:
-  FAIL_IF( parser.advance_char() != ':' );
-  parser.advance_char();
-  GOTO( parser.parse_value(addresses, addresses.object_continue) );
-
-object_continue:
-  switch (parser.advance_char()) {
-  case ',':
-    parser.increment_count();
-    FAIL_IF( parser.advance_char() != '"' );
-    FAIL_IF( parser.parse_string() );
-    goto object_key_state;
-  case '}':
-    parser.end_object();
-    goto scope_end;
-  default:
-    goto error;
+  //
+  // Object parser states
+  //
+  object_begin: {
+    switch (parser.advance_char()) {
+    case '"': {
+      FAIL_IF( parser.parse_string() );
+      goto object_key_state;
+    }
+    case '}':
+      parser.end_object();
+      goto scope_end;
+    default:
+      goto error;
+    }
   }
 
-scope_end:
-  CONTINUE( parser.doc_parser.ret_address[parser.depth] );
-
-//
-// Array parser states
-//
-array_begin:
-  if (parser.advance_char() == ']') {
-    parser.end_array();
-    goto scope_end;
-  }
-  parser.increment_count();
-
-main_array_switch:
-  /* we call update char on all paths in, so we can peek at parser.c on the
-   * on paths that can accept a close square brace (post-, and at start) */
-  GOTO( parser.parse_value(addresses, addresses.array_continue) );
-
-array_continue:
-  switch (parser.advance_char()) {
-  case ',':
-    parser.increment_count();
-    parser.advance_char();
-    goto main_array_switch;
-  case ']':
-    parser.end_array();
-    goto scope_end;
-  default:
-    goto error;
+  object_key_state: {
+    FAIL_IF( parser.advance_char() != ':' );
+    GOTO( parser.parse_value(addresses, addresses.object_continue) );
   }
 
-finish:
-  return parser.finish();
+  object_continue: {
+    switch (parser.advance_char()) {
+    case ',':
+      FAIL_IF( parser.advance_char() != '"' );
+      FAIL_IF( parser.parse_string() );
+      goto object_key_state;
+    case '}':
+      parser.end_object();
+      goto scope_end;
+    default:
+      goto error;
+    }
+  }
 
-error:
-  return parser.error();
+  scope_end: {
+    CONTINUE( parser.doc_parser.ret_address[parser.depth] );
+  }
+
+  //
+  // Array parser states
+  //
+  array_begin: {
+    if (parser.peek_char() == ']') {
+      parser.advance_char();
+      parser.end_array();
+      goto scope_end;
+    }
+  }
+
+  main_array_switch: {
+    // we call update char on all paths in, so we can peek at parser.c on the
+    // on paths that can accept a close square brace (post-, and at start)
+    GOTO( parser.parse_value(addresses, addresses.array_continue) );
+  }
+
+  array_continue: {
+    switch (parser.advance_char()) {
+    case ',':
+      goto main_array_switch;
+    case ']':
+      parser.end_array();
+      goto scope_end;
+    default:
+      goto error;
+    }
+  }
+
+  finish: {
+    return parser.finish();
+  }
+
+  error: {
+    return parser.error();
+  }
 }
 
 WARN_UNUSED error_code implementation::parse(const uint8_t *buf, size_t len, parser &doc_parser) const noexcept {
