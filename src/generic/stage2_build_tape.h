@@ -75,7 +75,7 @@ struct structural_parser {
   /** Next write location in the string buf for stage 2 parsing */
   const uint8_t *const buf;
   const uint32_t *next_structural_index;
-  uint8_t *current_string_buf_loc{};
+  uint8_t *current_string_buf_loc;
   uint32_t depth;
 
   really_inline structural_parser(
@@ -85,6 +85,7 @@ struct structural_parser {
   ) : doc_parser{_doc_parser},
       buf{_buf},
       next_structural_index{&_doc_parser.structural_indexes[next_structural]},
+      current_string_buf_loc{_doc_parser.doc.string_buf.get()},
       depth{0}
   {}
 
@@ -351,7 +352,6 @@ struct structural_parser {
   }
 
   really_inline void init() {
-    current_string_buf_loc = doc_parser.doc.string_buf.get();
     doc_parser.current_loc = 0;
     doc_parser.valid = false;
     doc_parser.error = UNINITIALIZED;
