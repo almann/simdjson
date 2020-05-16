@@ -71,24 +71,31 @@ struct number_writer {
 }; // struct number_writer
 
 struct structural_parser {
-  parser &doc_parser;
-  /** Next write location in the string buf for stage 2 parsing */
   const uint8_t *const buf;
-  const uint32_t *next_structural_index;
-  uint8_t *current_string_buf_loc;
+  parser &doc_parser;
+  const uint32_t *&next_structural_index;
+  uint8_t *&current_string_buf_loc;
   uint32_t depth;
 
   really_inline structural_parser(
-    parser &_doc_parser,
     const uint8_t *_buf,
-    const uint32_t *_next_structural_index,
-    uint8_t *_current_string_buf_loc,
+    parser &_doc_parser,
+    const uint32_t *&_next_structural_index,
+    uint8_t *&_current_string_buf_loc,
     uint32_t _depth
-  ) : doc_parser{_doc_parser},
-      buf{_buf},
+  ) : buf{_buf},
+      doc_parser{_doc_parser},
       next_structural_index{_next_structural_index},
       current_string_buf_loc{_current_string_buf_loc},
       depth{_depth} {
+  }
+
+  really_inline void start_document() {
+    write_tape(0, internal::tape_type::ROOT); // if the document is correct, this gets rewritten later
+  }
+  really_inline void end_document() {
+    doc_parser.doc.tape[0] |= doc_parser.current_loc | (uint64_t(1) << 32);
+    write_tape(0, internal::tape_type::ROOT);
   }
 
   WARN_UNUSED really_inline bool start_scope(internal::tape_type type, ret_address continue_state) {
@@ -98,10 +105,6 @@ struct structural_parser {
     doc_parser.ret_address[depth] = continue_state;
     depth++;
     return depth >= doc_parser.max_depth();
-  }
-
-  WARN_UNUSED really_inline bool start_document(ret_address continue_state) {
-    return start_scope(internal::tape_type::ROOT, continue_state);
   }
 
   WARN_UNUSED really_inline bool start_object(ret_address continue_state) {
@@ -132,9 +135,6 @@ struct structural_parser {
   }
   really_inline void end_array() {
     end_scope(internal::tape_type::END_ARRAY);
-  }
-  really_inline void end_document() {
-    end_scope(internal::tape_type::ROOT);
   }
 
   really_inline void write_tape(uint64_t val, internal::tape_type t) noexcept {
@@ -257,7 +257,6 @@ struct structural_parser {
   }
 
   WARN_UNUSED really_inline ret_address parse_value(const unified_machine_addresses &addresses, ret_address continue_state) {
-    increment_count();
     switch (advance_char()) {
     case '"':
       FAIL_IF( parse_string() );
@@ -294,9 +293,6 @@ struct structural_parser {
     }
     end_document();
     if (depth != 0) {
-      return on_error(TAPE_ERROR);
-    }
-    if (doc_parser.containing_scope[depth].tape_index != 0) {
       return on_error(TAPE_ERROR);
     }
 
@@ -359,15 +355,13 @@ struct structural_parser {
     doc_parser.error = UNINITIALIZED;
   }
 
-  WARN_UNUSED really_inline error_code start(size_t len, ret_address finish_state) {
+  WARN_UNUSED really_inline error_code start(size_t len) {
     init(); // sets is_valid to false
     if (len > doc_parser.capacity()) {
       return CAPACITY;
     }
     // Push the root scope (there is always at least one scope)
-    if (start_document(finish_state)) {
-      return on_error(DEPTH_ERROR);
-    }
+    start_document();
     return SUCCESS;
   }
 
@@ -391,44 +385,19 @@ struct structural_parser {
 #undef FAIL_IF
 #define FAIL_IF(EXPR) { if (EXPR) { goto error; } }
 
-} // namespace stage2
-
-/************
- * The JSON is parsed to a tape, see the accompanying tape.md file
- * for documentation.
- ***********/
-WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, parser &doc_parser) const noexcept {
+namespace {
+template<typename P>
+WARN_UNUSED static bool parse_value(
+  const uint8_t *buf,
+  parser &doc_parser,
+  const uint32_t *next_structural_index,
+  uint8_t *current_string_buf_loc,
+  uint32_t depth
+) noexcept {
   static constexpr stage2::unified_machine_addresses addresses = INIT_ADDRESSES();
-  stage2::structural_parser parser(doc_parser, buf, &doc_parser.structural_indexes[0], doc_parser.doc.string_buf.get(), 0);
-  error_code result = parser.start(len, addresses.finish);
-  if (result) { return result; }
+  P parser(buf, doc_parser, next_structural_index, current_string_buf_loc, depth);
 
-  //
-  // Read first value
-  //
-  switch (parser.advance_char()) {
-  case '{':
-    FAIL_IF( parser.start_object(addresses.finish) );
-    goto object_begin;
-  case '[':
-    FAIL_IF( parser.start_array(addresses.finish) );
-    goto array_begin;
-  case '"':
-    FAIL_IF( parser.parse_string() );
-    goto finish;
-  case 't': case 'f': case 'n':
-    FAIL_IF( parser.parse_single_atom(len) );
-    goto finish;
-  case '0': case '1': case '2': case '3': case '4':
-  case '5': case '6': case '7': case '8': case '9':
-    FAIL_IF( parser.parse_single_number(len, false) );
-    goto finish;
-  case '-':
-    FAIL_IF( parser.parse_single_number(len, true) );
-    goto finish;
-  default:
-    goto error;
-  }
+  GOTO( parser.parse_value(addresses, addresses.finish) );
 
   //
   // Object parser states
@@ -449,6 +418,7 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
 
   object_key_state: {
     FAIL_IF( parser.advance_char() != ':' );
+    parser.increment_count();
     GOTO( parser.parse_value(addresses, addresses.object_continue) );
   }
 
@@ -484,6 +454,7 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
   main_array_switch: {
     // we call update char on all paths in, so we can peek at parser.c on the
     // on paths that can accept a close square brace (post-, and at start)
+    parser.increment_count();
     GOTO( parser.parse_value(addresses, addresses.array_continue) );
   }
 
@@ -500,12 +471,68 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
   }
 
   finish: {
-    return parser.finish();
+    return false;
   }
 
   error: {
-    return parser.error();
+    return true;
   }
+} // parse_value()
+
+} // namespace {}
+
+template<typename P>
+WARN_UNUSED static error_code parse_document(
+  const uint8_t *buf,
+  parser &doc_parser,
+  const uint32_t *&next_structural_index,
+  uint8_t *&current_string_buf_loc,
+  size_t len
+) noexcept {
+  P parser(buf, doc_parser, next_structural_index, current_string_buf_loc, 0);
+  error_code result = parser.start(len);
+  if (result) { return result; }
+
+  //
+  // Special case first value parsing if it's an atom or number
+  //
+  bool failed;
+  switch (parser.peek_char()) {
+  case 't': case 'f': case 'n':
+    parser.advance_char();
+    failed = parser.parse_single_atom(len);
+    break;
+  case '0': case '1': case '2': case '3': case '4':
+  case '5': case '6': case '7': case '8': case '9':
+    parser.advance_char();
+    failed = parser.parse_single_number(len, false);
+    break;
+  case '-':
+    parser.advance_char();
+    failed = parser.parse_single_number(len, true);
+    break;
+  default:
+    failed = parse_value<P>(parser.buf, parser.doc_parser, parser.next_structural_index, parser.current_string_buf_loc, parser.depth);
+    break;
+  }
+
+  if (failed) {
+    return parser.error();    
+  }
+
+  return parser.finish();
+} // parse_document()
+
+} // namespace stage2
+
+/************
+ * The JSON is parsed to a tape, see the accompanying tape.md file
+ * for documentation.
+ ***********/
+WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, parser &doc_parser) const noexcept {
+  const uint32_t *next_structural_index = &doc_parser.structural_indexes[0];
+  uint8_t *current_string_buf_loc = &doc_parser.doc.string_buf[0];
+  return stage2::parse_document<stage2::structural_parser>(buf, doc_parser, next_structural_index, current_string_buf_loc, len);
 }
 
 WARN_UNUSED error_code implementation::parse(const uint8_t *buf, size_t len, parser &doc_parser) const noexcept {
