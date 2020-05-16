@@ -5,6 +5,8 @@
 
 namespace stage2 {
 
+namespace {
+
 #ifdef SIMDJSON_USE_COMPUTED_GOTO
 typedef void* ret_address;
 #define INIT_ADDRESSES() { &&array_begin, &&array_continue, &&error, &&finish, &&object_begin, &&object_continue }
@@ -282,33 +284,6 @@ struct structural_parser {
     }
   }
 
-  really_inline uint32_t *end_structural_indexes() {
-    return doc_parser.structural_indexes.get() + doc_parser.n_structural_indexes;
-  }
-
-  WARN_UNUSED really_inline error_code finish() {
-    // the string might not be NULL terminated.
-    if ( next_structural_index == end_structural_indexes() ) {
-      return on_error(TAPE_ERROR);
-    }
-    end_document();
-    if (depth != 0) {
-      return on_error(TAPE_ERROR);
-    }
-
-    return on_success(SUCCESS);
-  }
-
-  really_inline error_code on_error(error_code new_error_code) noexcept {
-    doc_parser.error = new_error_code;
-    return new_error_code;
-  }
-  really_inline error_code on_success(error_code success_code) noexcept {
-    doc_parser.error = success_code;
-    doc_parser.valid = true;
-    return success_code;
-  }
-
   WARN_UNUSED really_inline error_code error() {
     /* We do not need the next line because this is done by doc_parser.init_stage2(),
     * pessimistically.
@@ -321,11 +296,11 @@ struct structural_parser {
     * carefully,
     * all without any added cost. */
     if (depth >= doc_parser.max_depth()) {
-      return on_error(DEPTH_ERROR);
+      return DEPTH_ERROR;
     }
     switch (current_char()) {
     case '"':
-      return on_error(STRING_ERROR);
+      return STRING_ERROR;
     case '0':
     case '1':
     case '2':
@@ -337,32 +312,16 @@ struct structural_parser {
     case '8':
     case '9':
     case '-':
-      return on_error(NUMBER_ERROR);
+      return NUMBER_ERROR;
     case 't':
-      return on_error(T_ATOM_ERROR);
+      return T_ATOM_ERROR;
     case 'n':
-      return on_error(N_ATOM_ERROR);
+      return N_ATOM_ERROR;
     case 'f':
-      return on_error(F_ATOM_ERROR);
+      return F_ATOM_ERROR;
     default:
-      return on_error(TAPE_ERROR);
+      return TAPE_ERROR;
     }
-  }
-
-  really_inline void init() {
-    doc_parser.current_loc = 0;
-    doc_parser.valid = false;
-    doc_parser.error = UNINITIALIZED;
-  }
-
-  WARN_UNUSED really_inline error_code start(size_t len) {
-    init(); // sets is_valid to false
-    if (len > doc_parser.capacity()) {
-      return CAPACITY;
-    }
-    // Push the root scope (there is always at least one scope)
-    start_document();
-    return SUCCESS;
   }
 
   really_inline char peek_char() {
@@ -385,8 +344,6 @@ struct structural_parser {
 #undef FAIL_IF
 #define FAIL_IF(EXPR) { if (EXPR) { goto error; } }
 
-namespace {
-template<typename P>
 WARN_UNUSED static bool parse_value(
   const uint8_t *buf,
   parser &doc_parser,
@@ -395,7 +352,7 @@ WARN_UNUSED static bool parse_value(
   uint32_t depth
 ) noexcept {
   static constexpr stage2::unified_machine_addresses addresses = INIT_ADDRESSES();
-  P parser(buf, doc_parser, next_structural_index, current_string_buf_loc, depth);
+  structural_parser parser(buf, doc_parser, next_structural_index, current_string_buf_loc, depth);
 
   GOTO( parser.parse_value(addresses, addresses.finish) );
 
@@ -479,19 +436,21 @@ WARN_UNUSED static bool parse_value(
   }
 } // parse_value()
 
-} // namespace {}
-
-template<typename P>
-WARN_UNUSED static error_code parse_document(
+WARN_UNUSED static really_inline error_code parse_document(
   const uint8_t *buf,
   parser &doc_parser,
-  const uint32_t *&next_structural_index,
-  uint8_t *&current_string_buf_loc,
+  const uint32_t *next_structural_index,
+  uint8_t *current_string_buf_loc,
   size_t len
 ) noexcept {
-  P parser(buf, doc_parser, next_structural_index, current_string_buf_loc, 0);
-  error_code result = parser.start(len);
-  if (result) { return result; }
+  // Initialize parsing
+  structural_parser parser(buf, doc_parser, next_structural_index, current_string_buf_loc, 0);
+  doc_parser.current_loc = 0;
+  doc_parser.valid = false;
+  doc_parser.error = UNINITIALIZED;
+
+  // Push the root scope (there is always at least one scope)
+  parser.start_document();
 
   //
   // Special case first value parsing if it's an atom or number
@@ -512,16 +471,26 @@ WARN_UNUSED static error_code parse_document(
     failed = parser.parse_single_number(len, true);
     break;
   default:
-    failed = parse_value<P>(parser.buf, parser.doc_parser, parser.next_structural_index, parser.current_string_buf_loc, parser.depth);
+    failed = parse_value(buf, doc_parser, next_structural_index, current_string_buf_loc, parser.depth);
     break;
   }
 
+  // Finish up the document and check for errors.
+  parser.end_document();
+
   if (failed) {
-    return parser.error();    
+    return doc_parser.error = parser.error();
   }
 
-  return parser.finish();
+  if (parser.depth != 0) {
+    return doc_parser.error = TAPE_ERROR;
+  }
+
+  doc_parser.valid = true;
+  return doc_parser.error = (*next_structural_index == 0) ? SUCCESS : SUCCESS_AND_HAS_MORE;
 } // parse_document()
+
+} // namespace {}
 
 } // namespace stage2
 
@@ -532,7 +501,24 @@ WARN_UNUSED static error_code parse_document(
 WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, parser &doc_parser) const noexcept {
   const uint32_t *next_structural_index = &doc_parser.structural_indexes[0];
   uint8_t *current_string_buf_loc = &doc_parser.doc.string_buf[0];
-  return stage2::parse_document<stage2::structural_parser>(buf, doc_parser, next_structural_index, current_string_buf_loc, len);
+  error_code error = stage2::parse_document(buf, doc_parser, next_structural_index, current_string_buf_loc, len);
+  // If there were more structurals, this is not a single valid document.
+  if (error == SUCCESS_AND_HAS_MORE) {
+    doc_parser.valid = false;
+    return doc_parser.error = TAPE_ERROR;
+  }
+  return error;
+}
+
+/************
+ * The JSON is parsed to a tape, see the accompanying tape.md file
+ * for documentation.
+ ***********/
+WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, parser &doc_parser, size_t &next_json) const noexcept {
+  const uint32_t *next_structural_index = &doc_parser.structural_indexes[next_json];
+  uint8_t *current_string_buf_loc = &doc_parser.doc.string_buf[0];
+  return stage2::parse_document(buf, doc_parser, next_structural_index, current_string_buf_loc, len);
+  return SUCCESS;
 }
 
 WARN_UNUSED error_code implementation::parse(const uint8_t *buf, size_t len, parser &doc_parser) const noexcept {
