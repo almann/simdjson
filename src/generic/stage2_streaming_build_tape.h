@@ -2,11 +2,12 @@ namespace stage2 {
 
 struct streaming_structural_parser: structural_parser {
   really_inline streaming_structural_parser(
-    const uint8_t *_buf,
     parser &_doc_parser,
-    uint32_t next_structural
-  ) : structural_parser(_buf, _doc_parser, next_structural)
-  {
+    const uint8_t *_buf,
+    const uint32_t *_next_structural_index,
+    uint8_t *_current_string_buf_loc,
+    uint32_t _depth
+  ) : structural_parser(_doc_parser, _buf, _next_structural_index, _current_string_buf_loc, _depth) {
   }
 
   // override to add streaming
@@ -47,7 +48,7 @@ struct streaming_structural_parser: structural_parser {
  ***********/
 WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, parser &doc_parser, size_t &next_json) const noexcept {
   static constexpr stage2::unified_machine_addresses addresses = INIT_ADDRESSES();
-  stage2::streaming_structural_parser parser(buf, doc_parser, uint32_t(next_json));
+  stage2::structural_parser parser(doc_parser, buf, &doc_parser.structural_indexes[next_json], doc_parser.doc.string_buf.get(), 0);
   error_code result = parser.start(len, addresses.finish);
   if (result) { return result; }
 

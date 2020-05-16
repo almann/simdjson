@@ -79,15 +79,17 @@ struct structural_parser {
   uint32_t depth;
 
   really_inline structural_parser(
-    const uint8_t *_buf,
     parser &_doc_parser,
-    uint32_t next_structural = 0
+    const uint8_t *_buf,
+    const uint32_t *_next_structural_index,
+    uint8_t *_current_string_buf_loc,
+    uint32_t _depth
   ) : doc_parser{_doc_parser},
       buf{_buf},
-      next_structural_index{&_doc_parser.structural_indexes[next_structural]},
-      current_string_buf_loc{_doc_parser.doc.string_buf.get()},
-      depth{0}
-  {}
+      next_structural_index{_next_structural_index},
+      current_string_buf_loc{_current_string_buf_loc},
+      depth{_depth} {
+  }
 
   WARN_UNUSED really_inline bool start_scope(internal::tape_type type, ret_address continue_state) {
     doc_parser.containing_scope[depth].tape_index = doc_parser.current_loc;
@@ -397,7 +399,7 @@ struct structural_parser {
  ***********/
 WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, parser &doc_parser) const noexcept {
   static constexpr stage2::unified_machine_addresses addresses = INIT_ADDRESSES();
-  stage2::structural_parser parser(buf, doc_parser);
+  stage2::structural_parser parser(doc_parser, buf, &doc_parser.structural_indexes[0], doc_parser.doc.string_buf.get(), 0);
   error_code result = parser.start(len, addresses.finish);
   if (result) { return result; }
 
