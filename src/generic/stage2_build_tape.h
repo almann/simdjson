@@ -217,6 +217,11 @@ struct structural_parser {
   }
 
   WARN_UNUSED really_inline bool parse_object() {
+    if (parse_empty_object()) { return true; }
+    return parse_object_fields(buf, doc_parser, next_structural_index, current_string_buf_loc);
+  }
+
+  WARN_UNUSED really_inline bool parse_empty_object() {
     // Special case (short circuit) empty object
     if (peek_char() == '}') {
       log_state(__func__);
@@ -225,10 +230,15 @@ struct structural_parser {
       append_tape(doc_parser.current_loc-1, internal::tape_type::END_OBJECT);
       return true;
     }
-    return parse_object_fields(buf, doc_parser, next_structural_index, current_string_buf_loc);
+    return false;
   }
 
   WARN_UNUSED really_inline bool parse_array() {
+    if (parse_empty_array()) { return true; }
+    return parse_array_values(buf, doc_parser, next_structural_index, current_string_buf_loc);
+  }
+
+  WARN_UNUSED really_inline bool parse_empty_array() {
     // Special case (short circuit) empty array
     if (peek_char() == ']') {
       log_state(__func__);
@@ -237,7 +247,7 @@ struct structural_parser {
       append_tape(doc_parser.current_loc-1, internal::tape_type::END_ARRAY);
       return true;
     }
-    return parse_array_values(buf, doc_parser, next_structural_index, current_string_buf_loc);
+    return false;
   }
 
   WARN_UNUSED really_inline bool parse_object_fields() {
