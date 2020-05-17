@@ -52,13 +52,13 @@ struct structural_parser {
       current_string_buf_loc{_current_string_buf_loc} {
   }
 
-  WARN_UNUSED really_inline bool parse_document(size_t len) {
+  WARN_UNUSED really_inline bool parse_document() {
     log_start();
     log_start_value("document");
     doc_parser.current_loc = 1; // we will stuff the root element at the beginning later
 
     // Parse the document and check for errors
-    bool result = parse_root_value(len);
+    bool result = parse_root_value();
     // Write the begin/end root element
     append_tape(0, internal::tape_type::ROOT);
     write_tape(0, doc_parser.current_loc, internal::tape_type::ROOT);
@@ -92,22 +92,22 @@ struct structural_parser {
     }
   }
 
-  WARN_UNUSED really_inline bool parse_root_value(size_t len) {
+  WARN_UNUSED really_inline bool parse_root_value() {
     switch (advance_char()) {
     case '"':
       log_value("string");
       return parse_string();
     case 't':
-      return parse_root_true_atom(len);
+      return parse_root_true_atom();
     case 'f':
-      return parse_root_false_atom(len);
+      return parse_root_false_atom();
     case 'n':
-      return parse_root_null_atom(len);
+      return parse_root_null_atom();
     case '0': case '1': case '2': case '3': case '4':
     case '5': case '6': case '7': case '8': case '9':
-      return parse_root_number(len, false);
+      return parse_root_number(false);
     case '-':
-      return parse_root_number(len, true);
+      return parse_root_number(true);
     case '{':
       return parse_object();
     case '[':
@@ -157,7 +157,7 @@ struct structural_parser {
     return parse_number(current_buf(), found_minus);
   }
 
-  WARN_UNUSED really_inline bool parse_root_number(size_t len, bool found_minus) {
+  WARN_UNUSED really_inline bool parse_root_number(bool found_minus) {
     //
     // We need to make a copy to make sure that the string is space terminated.
     // This is not about padding the input, which should already padded up
@@ -171,13 +171,12 @@ struct structural_parser {
     // practice unless you are in the strange scenario where you have many JSON
     // documents made of single atoms.
     //
-    size_t remaining_len = buf + len - current_buf();
-    uint8_t *copy = static_cast<uint8_t *>(malloc(remaining_len + SIMDJSON_PADDING));
+    uint8_t *copy = static_cast<uint8_t *>(malloc(remaining_len() + SIMDJSON_PADDING));
     if (copy == nullptr) {
       return false;
     }
-    memcpy(copy, current_buf(), remaining_len);
-    memset(copy + remaining_len, ' ', SIMDJSON_PADDING);
+    memcpy(copy, current_buf(), remaining_len());
+    memset(copy + remaining_len(), ' ', SIMDJSON_PADDING);
     bool result = parse_number(copy, found_minus);
     free(copy);
     return result;
@@ -199,20 +198,20 @@ struct structural_parser {
     return atomparsing::is_valid_null_atom(current_buf());
   }
 
-  WARN_UNUSED really_inline bool parse_root_true_atom(size_t len) {
+  WARN_UNUSED really_inline bool parse_root_true_atom() {
     log_value("true");
     append_tape(0, internal::tape_type::TRUE_VALUE);
-    return atomparsing::is_valid_true_atom(current_buf(), remaining_len(len));
+    return atomparsing::is_valid_true_atom(current_buf(), remaining_len());
   }
-  WARN_UNUSED really_inline bool parse_root_false_atom(size_t len) {
+  WARN_UNUSED really_inline bool parse_root_false_atom() {
     log_value("false");
     append_tape(0, internal::tape_type::FALSE_VALUE);
-    return atomparsing::is_valid_false_atom(current_buf(), remaining_len(len));
+    return atomparsing::is_valid_false_atom(current_buf(), remaining_len());
   }
-  WARN_UNUSED really_inline bool parse_root_null_atom(size_t len) {
+  WARN_UNUSED really_inline bool parse_root_null_atom() {
     log_value("null");
     append_tape(0, internal::tape_type::NULL_VALUE);
-    return atomparsing::is_valid_null_atom(current_buf(), remaining_len(len));
+    return atomparsing::is_valid_null_atom(current_buf(), remaining_len());
   }
 
   WARN_UNUSED really_inline bool parse_object() {
@@ -377,8 +376,11 @@ struct structural_parser {
   really_inline const uint8_t* current_buf() {
     return &buf[*(next_structural_index-1)];
   }
-  really_inline size_t remaining_len(size_t len) {
-    return buf + len - current_buf();
+  really_inline size_t len() {
+    return doc_parser.structural_indexes[doc_parser.n_structural_indexes];
+  }
+  really_inline size_t remaining_len() {
+    return buf + len() - current_buf();
   }
   really_inline void write_tape(uint32_t loc, uint64_t val, internal::tape_type t) noexcept {
     doc_parser.doc.tape[loc] = val | ((uint64_t(char(t))) << 56);
@@ -436,17 +438,17 @@ struct structural_parser {
  * The JSON is parsed to a tape, see the accompanying tape.md file
  * for documentation.
  ***********/
-WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, parser &doc_parser) const noexcept {
+WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t /*len*/, parser &doc_parser) const noexcept {
   const uint32_t *next_structural_index = &doc_parser.structural_indexes[0];
   uint8_t *current_string_buf_loc = &doc_parser.doc.string_buf[0];
   stage2::structural_parser parser(buf, doc_parser, next_structural_index, current_string_buf_loc);
-  if (unlikely(!parser.parse_document(len))) {
+  if (unlikely(!parser.parse_document())) {
     parser.log_state("error");
     doc_parser.valid = false;
     return doc_parser.error = parser.error();
   }
 
-  if (*next_structural_index != len) {
+  if (*next_structural_index != doc_parser.structural_indexes[doc_parser.n_structural_indexes]) {
     parser.log_error("Malformed document (extra JSON at the end)");
     doc_parser.valid = false;
     return doc_parser.error = TAPE_ERROR;
@@ -460,11 +462,11 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
  * The JSON is parsed to a tape, see the accompanying tape.md file
  * for documentation.
  ***********/
-WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, parser &doc_parser, size_t &next_json) const noexcept {
+WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t /*len*/, parser &doc_parser, size_t &next_json) const noexcept {
   const uint32_t *next_structural_index = &doc_parser.structural_indexes[next_json];
   uint8_t *current_string_buf_loc = &doc_parser.doc.string_buf[0];
   stage2::structural_parser parser(buf, doc_parser, next_structural_index, current_string_buf_loc);
-  if (unlikely(!parser.parse_document(len))) {
+  if (unlikely(!parser.parse_document())) {
     parser.log_state("error");
     doc_parser.valid = false;
     return doc_parser.error = parser.error();
@@ -473,7 +475,7 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
   doc_parser.valid = true;
   // Update next_json to point at the next structural
   next_json = parser.next_structural_index - &doc_parser.structural_indexes[0];
-  if (*next_structural_index != len) {
+  if (next_json != doc_parser.n_structural_indexes) {
     parser.log_state("(and has more)");
     return doc_parser.error = SUCCESS_AND_HAS_MORE;
   }
