@@ -7,6 +7,11 @@ namespace stage2 {
 
 namespace {
 
+static constexpr const bool DEBUG = false;
+static constexpr const int LOG_TITLE_LEN = 30;
+
+static int log_depth; // Not threadsafe. Log only.
+
 struct number_writer {
   parser &doc_parser;
   
@@ -47,30 +52,24 @@ struct structural_parser {
       current_string_buf_loc{_current_string_buf_loc} {
   }
 
-  WARN_UNUSED really_inline error_code parse_document(size_t len) {
-    log_state("start document");
+  WARN_UNUSED really_inline bool parse_document(size_t len) {
+    log_start();
+    log_start_value("document");
     doc_parser.current_loc = 1; // we will stuff the root element at the beginning later
-    doc_parser.valid = false;
-    doc_parser.error = UNINITIALIZED;
 
     // Parse the document and check for errors
-    if (!parse_root_value(len)) { log_state("error"); return doc_parser.error = error(); }
-
+    bool result = parse_root_value(len);
     // Write the begin/end root element
     append_tape(0, internal::tape_type::ROOT);
     write_tape(0, doc_parser.current_loc, internal::tape_type::ROOT);
-    doc_parser.valid = true;
-    if (*next_structural_index != len) {
-      log_state("end document (has more)");
-      return doc_parser.error = SUCCESS_AND_HAS_MORE;
-    } 
-    log_state("end document");
-    return doc_parser.error = SUCCESS;
+    log_end_value("document");
+    return result;
   }
 
   WARN_UNUSED really_inline bool parse_value() {
     switch (advance_char()) {
     case '"':
+      log_value("string");
       return parse_string();
     case 't':
       return parse_true_atom();
@@ -96,6 +95,7 @@ struct structural_parser {
   WARN_UNUSED really_inline bool parse_root_value(size_t len) {
     switch (advance_char()) {
     case '"':
+      log_value("string");
       return parse_string();
     case 't':
       return parse_root_true_atom(len);
@@ -119,7 +119,6 @@ struct structural_parser {
   }
 
   WARN_UNUSED really_inline bool parse_string() {
-    log_state(__func__);
     uint8_t *dst = start_string();
     dst = stringparsing::parse_string(current_buf(), dst);
     if (dst == nullptr) {
@@ -150,7 +149,7 @@ struct structural_parser {
   }
 
   WARN_UNUSED really_inline bool parse_number(const uint8_t *src, bool found_minus) {
-    log_state(__func__);
+    log_value("number");
     number_writer writer{doc_parser};
     return numberparsing::parse_number(src, found_minus, writer);
   }
@@ -185,33 +184,33 @@ struct structural_parser {
   }
 
   WARN_UNUSED really_inline bool parse_true_atom() {
-    log_state(__func__);
+    log_value("true");
     append_tape(0, internal::tape_type::TRUE_VALUE);
     return atomparsing::is_valid_true_atom(current_buf());
   }
   WARN_UNUSED really_inline bool parse_false_atom() {
-    log_state(__func__);
+    log_value("false");
     append_tape(0, internal::tape_type::FALSE_VALUE);
     return atomparsing::is_valid_false_atom(current_buf());
   }
   WARN_UNUSED really_inline bool parse_null_atom() {
-    log_state(__func__);
+    log_value("null");
     append_tape(0, internal::tape_type::NULL_VALUE);
     return atomparsing::is_valid_null_atom(current_buf());
   }
 
   WARN_UNUSED really_inline bool parse_root_true_atom(size_t len) {
-    log_state(__func__);
+    log_value("true");
     append_tape(0, internal::tape_type::TRUE_VALUE);
     return atomparsing::is_valid_true_atom(current_buf(), remaining_len(len));
   }
   WARN_UNUSED really_inline bool parse_root_false_atom(size_t len) {
-    log_state(__func__);
+    log_value("false");
     append_tape(0, internal::tape_type::FALSE_VALUE);
     return atomparsing::is_valid_false_atom(current_buf(), remaining_len(len));
   }
   WARN_UNUSED really_inline bool parse_root_null_atom(size_t len) {
-    log_state(__func__);
+    log_value("null");
     append_tape(0, internal::tape_type::NULL_VALUE);
     return atomparsing::is_valid_null_atom(current_buf(), remaining_len(len));
   }
@@ -224,7 +223,7 @@ struct structural_parser {
   WARN_UNUSED really_inline bool parse_empty_object() {
     // Special case (short circuit) empty object
     if (peek_char() == '}') {
-      log_state(__func__);
+      log_value("{}");
       advance_char();
       append_tape(doc_parser.current_loc+2, internal::tape_type::START_OBJECT);
       append_tape(doc_parser.current_loc-1, internal::tape_type::END_OBJECT);
@@ -241,7 +240,7 @@ struct structural_parser {
   WARN_UNUSED really_inline bool parse_empty_array() {
     // Special case (short circuit) empty array
     if (peek_char() == ']') {
-      log_state(__func__);
+      log_value("[]");
       advance_char();
       append_tape(doc_parser.current_loc+2, internal::tape_type::START_ARRAY);
       append_tape(doc_parser.current_loc-1, internal::tape_type::END_ARRAY);
@@ -251,7 +250,7 @@ struct structural_parser {
   }
 
   WARN_UNUSED really_inline bool parse_object_fields() {
-    log_state("start object");
+    log_start_value("object");
     // We will write the start array later
     const uint32_t start_loc = doc_parser.current_loc;
     doc_parser.current_loc++;
@@ -260,6 +259,7 @@ struct structural_parser {
     uint32_t count = 0;
     do {
       if (advance_char() != '"') { log_error("Key/value pair does not start with a string!"); return false; }
+      log_value("key");
       if (!parse_string()) { return false; }
       if (advance_char() != ':') { log_error("No ':' in key/value pair!"); return false; }
       if (!parse_value()) { return false; }
@@ -272,7 +272,7 @@ struct structural_parser {
     write_tape(start_loc, doc_parser.current_loc | (uint64_t(cntsat) << 32), internal::tape_type::START_OBJECT);
 
     // We know it's not a comma; make sure this is actually the end of an object!
-    log_state("end object");
+    log_end_value("object");
     if (current_char() != '}') {
       log_error("object not terminated by }");
       return false;
@@ -281,7 +281,7 @@ struct structural_parser {
   }
 
   WARN_UNUSED really_inline bool parse_array_values() {
-    log_state("start parse_array_values");
+    log_start_value("array");
     // We will write the start array later
     const uint32_t start_loc = doc_parser.current_loc;
     doc_parser.current_loc++;
@@ -299,7 +299,7 @@ struct structural_parser {
     write_tape(start_loc, doc_parser.current_loc | (uint64_t(cntsat) << 32), internal::tape_type::START_ARRAY);
 
     // We know it's not a comma; make sure this is actually the end of an array!
-    log_state("end parse_array_values");
+    log_end_value("array");
     if (current_char() != ']') {
       log_error("object not terminated by ]");
       return false;
@@ -388,12 +388,42 @@ struct structural_parser {
     doc_parser.current_loc++;
   }
 
-  really_inline void log_state(UNUSED const char *state) {
-    // printf("%30s (%c %c)\n", state, current_char(), peek_char());
+  really_inline void log_state(const char *state) {
+    if (DEBUG) {
+      printf("%*s%-*s %.10s -> %c\n", log_depth*2, "", LOG_TITLE_LEN - log_depth*2, state, current_buf(), peek_char());
+    }
   }
 
-  really_inline void log_error(UNUSED const char *error) {
-    // printf("ERROR %s (%c %c)", error, current_char(), peek_char());
+  really_inline void log_value(const char *type) {
+    if (DEBUG) {
+      printf("%*s%-*s %.10s -> %c\n", log_depth*2, "", LOG_TITLE_LEN - log_depth*2, type, current_buf(), peek_char());
+    }
+  }
+
+  static really_inline void log_start() {
+    if (DEBUG) {
+      log_depth = 0;
+    }
+  }
+
+  really_inline void log_start_value(const char *type) {
+    if (DEBUG) {
+      printf("%*sstart %-*s %.10s -> %c\n", log_depth*2, "", LOG_TITLE_LEN - log_depth*2 - 6, type, current_buf(), peek_char());
+      log_depth++;
+    }
+  }
+
+  really_inline void log_end_value(const char *type) {
+    if (DEBUG) {
+      log_depth--;
+      printf("%*send %-*s %.10s -> %c\n", log_depth*2, "", LOG_TITLE_LEN - log_depth*2 - 4, type, current_buf(), peek_char());
+    }
+  }
+
+  really_inline void log_error(const char *error) {
+    if (DEBUG) {
+      printf("ERROR %s %.10s -> %c", error, current_buf(), peek_char());
+    }
   }
 
 }; // struct structural_parser
@@ -410,13 +440,20 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
   const uint32_t *next_structural_index = &doc_parser.structural_indexes[0];
   uint8_t *current_string_buf_loc = &doc_parser.doc.string_buf[0];
   stage2::structural_parser parser(buf, doc_parser, next_structural_index, current_string_buf_loc);
-  error_code error = parser.parse_document(len);
-  // If there were more structurals, this is not a single valid document.
-  if (error == SUCCESS_AND_HAS_MORE) {
+  if (unlikely(!parser.parse_document(len))) {
+    parser.log_state("error");
+    doc_parser.valid = false;
+    return doc_parser.error = parser.error();
+  }
+
+  if (*next_structural_index != len) {
+    parser.log_error("Malformed document (extra JSON at the end)");
     doc_parser.valid = false;
     return doc_parser.error = TAPE_ERROR;
   }
-  return error;
+
+  doc_parser.valid = true;
+  return doc_parser.error = SUCCESS;
 }
 
 /************
@@ -427,7 +464,21 @@ WARN_UNUSED error_code implementation::stage2(const uint8_t *buf, size_t len, pa
   const uint32_t *next_structural_index = &doc_parser.structural_indexes[next_json];
   uint8_t *current_string_buf_loc = &doc_parser.doc.string_buf[0];
   stage2::structural_parser parser(buf, doc_parser, next_structural_index, current_string_buf_loc);
-  return parser.parse_document(len);
+  if (unlikely(!parser.parse_document(len))) {
+    parser.log_state("error");
+    doc_parser.valid = false;
+    return doc_parser.error = parser.error();
+  }
+
+  doc_parser.valid = true;
+  // Update next_json to point at the next structural
+  next_json = parser.next_structural_index - &doc_parser.structural_indexes[0];
+  if (*next_structural_index != len) {
+    parser.log_state("(and has more)");
+    return doc_parser.error = SUCCESS_AND_HAS_MORE;
+  }
+
+  return doc_parser.error = SUCCESS;
 }
 
 WARN_UNUSED error_code implementation::parse(const uint8_t *buf, size_t len, parser &doc_parser) const noexcept {
