@@ -974,17 +974,6 @@ public:
   /** @private Structural indices passed from stage 1 to stage 2 */
   std::unique_ptr<uint32_t[]> structural_indexes{};
 
-  /** @private Tape location of each open { or [ */
-  std::unique_ptr<scope_descriptor[]> containing_scope{};
-
-#ifdef SIMDJSON_USE_COMPUTED_GOTO
-  /** @private Return address of each open { or [ */
-  std::unique_ptr<void*[]> ret_address{};
-#else
-  /** @private Return address of each open { or [ */
-  std::unique_ptr<char[]> ret_address{};
-#endif
-
   /** @private Use `if (parser.parse(...).error())` instead */
   bool valid{false};
   /** @private Use `parser.parse(...).error()` instead */

@@ -493,35 +493,7 @@ inline error_code parser::allocate(size_t capacity, size_t max_depth) noexcept {
     if (err) { return err; }
   }
 
-  //
-  // If max_depth has changed, reallocate those buffers
-  //
-  if (max_depth != _max_depth) {
-    _max_depth = 0;
-
-    if (max_depth == 0) {
-      ret_address.reset();
-      containing_scope.reset();
-      return SUCCESS;
-    }
-
-    //
-    // Initialize stage 2 state
-    //
-    containing_scope.reset(new (std::nothrow) scope_descriptor[max_depth]); // TODO realloc
-  #ifdef SIMDJSON_USE_COMPUTED_GOTO
-    ret_address.reset(new (std::nothrow) void *[max_depth]);
-  #else
-    ret_address.reset(new (std::nothrow) char[max_depth]);
-  #endif
-
-    if (!ret_address || !containing_scope) {
-      // Could not allocate memory
-      return MEMALLOC;
-    }
-
-    _max_depth = max_depth;
-  }
+  _max_depth = max_depth;
   return SUCCESS;
 }
 
